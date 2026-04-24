@@ -1,0 +1,19 @@
+[project]
+name = "data-risk-agent"
+version = "0.1.0"
+description = "Data risk agent for incident-driven risk discovery"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "streamlit>=1.40,<2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
