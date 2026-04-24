@@ -1,5 +1,6 @@
 .DS_Store
 .benchmarks/
+.gh-cli-config/
 .idea/
 .pytest_cache/
 .venv/
