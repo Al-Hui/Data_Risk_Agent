@@ -93,6 +93,9 @@ class DataRiskAgent:
                     risk_id=match.risk_id,
                     process_id=match.process_id,
                     process_name=match.process_name,
+                    service_id=match.service_id,
+                    service_name=match.service_name,
+                    status=match.status,
                     title=match.title,
                     description=match.description,
                 )
@@ -223,7 +226,7 @@ class DataRiskAgent:
                 confidence=narrative.confidence,
             )
             validation = self.llm.validate_scenario(scenario)
-            if validation.verdict is not ValidationVerdict.FAIL:
+            if validation.verdict is ValidationVerdict.PASS:
                 scenarios.append(scenario)
         return scenarios
 
@@ -245,11 +248,11 @@ class DataRiskAgent:
         if pass_confidences:
             verdict = ValidationVerdict.PASS
             confidence = max(pass_confidences)
-            rationale = "Хотя бы один сценарий подтверждает риск данных для этой пары процесс + ИТ-услуга."
+            rationale = "Все включенные в карточку сценарии подтверждают риск данных для этой пары процесс + ИТ-услуга."
         elif review_confidences:
             verdict = ValidationVerdict.REVIEW
             confidence = max(review_confidences)
-            rationale = "Сценарии требуют ручной проверки перед регистрацией."
+            rationale = "Подтвержденные сценарии не найдены, поэтому риск требует ручной проверки."
         else:
             verdict = ValidationVerdict.FAIL
             confidence = max((item.confidence for item in validations), default=0.2)
@@ -269,9 +272,7 @@ class DataRiskAgent:
                 for reason in item.rejection_reasons
             ),
         )
-        description = " ".join(
-            unique_preserve_order(scenario.data_degradation_hypothesis for scenario in all_scenarios)
-        )
+        description = self._format_candidate_description(all_scenarios)
         merged = replace(
             base,
             candidate_id=f"{base.process_id}::{base.service_id}",
@@ -293,11 +294,28 @@ class DataRiskAgent:
         self._candidate_cache[merged.candidate_id] = merged
         return merged
 
+    def _format_candidate_description(self, scenarios: list[RiskScenario]) -> str:
+        scenario_descriptions = unique_preserve_order(
+            scenario.data_degradation_hypothesis for scenario in scenarios
+        )
+        if len(scenario_descriptions) <= 1:
+            return scenario_descriptions[0] if scenario_descriptions else ""
+        return "\n\n".join(
+            f"Сценарий {index}: {description}"
+            for index, description in enumerate(scenario_descriptions, start=1)
+        )
+
     def _list_process_risks(self, process_id: str) -> list[ExistingRisk]:
         return [
             risk for risk in self.existing_risk_source.list_existing_risks()
             if risk.process_id == process_id
         ]
+
+    def get_process_risks(self, process_id: str) -> list[ExistingRisk]:
+        return self._list_process_risks(process_id)
+
+    def has_process_risks(self, process_id: str) -> bool:
+        return bool(self._list_process_risks(process_id))
 
     def find_existing_risks(self, process_id: str) -> list[ExistingRiskMatch]:
         matches: list[ExistingRiskMatch] = []
@@ -311,6 +329,9 @@ class DataRiskAgent:
                     risk_id=risk.risk_id,
                     process_id=risk.process_id,
                     process_name=risk.process_name,
+                    service_id=risk.service_id,
+                    service_name=risk.service_name,
+                    status=risk.status,
                     title=risk.title,
                     description=risk.description,
                     similarity=similarity,
@@ -347,6 +368,8 @@ class DataRiskAgent:
                 related.append(
                     MitigationCandidate(
                         work_ids=[work.work_id],
+                        service_id=work.service_id,
+                        service_name=work.service_name,
                         description=f"{work.title}: {work.description}",
                         rationale=rationale,
                     )
@@ -422,6 +445,8 @@ class DataRiskAgent:
                     data_quality_signals=validation.data_quality_signals,
                     rejection_reasons=["Не извлечен идентификатор контракта или оферты."],
                 )
+            if validation.verdict is not ValidationVerdict.PASS:
+                continue
             description = scenario.data_degradation_hypothesis
             candidate = RiskCandidate(
                 candidate_id=f"{scenario.process_id}::{scenario.service_id}::{scenario.incident_id}",

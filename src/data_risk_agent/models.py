@@ -80,6 +80,9 @@ class ExistingRisk:
     risk_id: str
     process_id: str
     process_name: str
+    service_id: str
+    service_name: str
+    status: str
     title: str
     description: str
 
@@ -89,6 +92,7 @@ class RemediationWork:
     work_id: str
     incident_id: str
     service_id: str
+    service_name: str
     title: str
     description: str
 
@@ -138,6 +142,8 @@ class ValidationResult:
 @dataclass(slots=True)
 class MitigationCandidate:
     work_ids: list[str]
+    service_id: str
+    service_name: str
     description: str
     rationale: str
 
@@ -147,6 +153,9 @@ class ExistingRiskMatch:
     risk_id: str
     process_id: str
     process_name: str
+    service_id: str
+    service_name: str
+    status: str
     title: str
     description: str
     similarity: float

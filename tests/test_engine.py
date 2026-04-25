@@ -37,11 +37,11 @@ def test_main_demo_risk_has_expected_description() -> None:
     assert candidate.description == EXPECTED_MAIN_RISK_DESCRIPTION
 
 
-def test_standard_incident_without_reference_goes_to_needs_review() -> None:
+def test_unconfirmed_scenarios_are_not_included_in_candidates() -> None:
     agent = build_agent()
     result = agent.run()
-    candidate = next(item for item in result.candidates if item.candidate_id == "P1180::CI66778899")
-    assert candidate.status == RiskStatus.NEEDS_REVIEW
+    assert all(item.candidate_id != "P1180::CI66778899" for item in result.candidates)
+    assert "INC-1005" in result.rejected_incidents
 
 
 def test_nonstandard_data_incident_is_analyzed() -> None:
@@ -63,6 +63,14 @@ def test_multiple_incidents_merge_into_one_candidate() -> None:
     merged = next(item for item in result.candidates if item.candidate_id == "P1340::CI12345667")
     assert {"INC-1001", "INC-1002"}.issubset(set(merged.incident_ids))
     assert len(merged.scenarios) >= 2
+
+
+def test_multiple_unique_scenarios_are_separated_explicitly() -> None:
+    agent = build_agent()
+    result = agent.run()
+    candidate = next(item for item in result.candidates if item.candidate_id == "P2210::CI22334455")
+    assert "Сценарий 1:" in candidate.description
+    assert "Сценарий 2:" in candidate.description
 
 
 def test_existing_risk_lookup_uses_process_only() -> None:
@@ -135,7 +143,7 @@ def test_quality_metrics_are_calculated() -> None:
     metrics = agent.compute_quality_metrics(result.candidates)
     assert metrics.total_incidents == 20
     assert metrics.incidents_with_data_risk_signs == 17
-    assert metrics.total_risk_candidates == 3
+    assert metrics.total_risk_candidates == 2
     assert metrics.rejected_risks >= 1
     assert metrics.corrected_risks >= 1
     assert metrics.trend

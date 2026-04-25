@@ -78,6 +78,9 @@ class ExistingRiskSource:
                 risk_id=row["risk_id"],
                 process_id=row["process_id"],
                 process_name=row["process_name"],
+                service_id=row["service_id"],
+                service_name=row["service_name"],
+                status=row["status"],
                 title=row["title"],
                 description=row["description"],
             )
@@ -95,6 +98,7 @@ class RemediationWorkSource:
                 work_id=row["work_id"],
                 incident_id=row["incident_id"],
                 service_id=row["service_id"],
+                service_name=row["service_name"],
                 title=row["title"],
                 description=row["description"],
             )
