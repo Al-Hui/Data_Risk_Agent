@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import html
-import importlib.util
-import io
 import json
 import sys
 from datetime import datetime
@@ -889,21 +887,6 @@ def build_candidates_export_df(agent: DataRiskAgent, candidates) -> pd.DataFrame
     return pd.DataFrame(rows)
 
 
-def dataframe_to_excel_bytes(frame: pd.DataFrame) -> bytes:
-    engine = None
-    if importlib.util.find_spec("openpyxl") is not None:
-        engine = "openpyxl"
-    elif importlib.util.find_spec("xlsxwriter") is not None:
-        engine = "xlsxwriter"
-    if engine is None:
-        raise RuntimeError("Excel export engine is not available.")
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine=engine) as writer:
-        frame.to_excel(writer, index=False, sheet_name="Риски")
-    output.seek(0)
-    return output.getvalue()
-
-
 def filter_candidates(agent: DataRiskAgent, candidates, process_filter: str, service_filter: str, status_filter: str, search_query: str):
     normalized_query = search_query.strip().lower()
     filtered = []
@@ -1042,30 +1025,13 @@ with risk_tab:
         )
         summary_df = build_candidates_export_df(agent, visible_candidates)
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
-        excel_bytes = None
-        excel_export_available = True
-        try:
-            excel_bytes = dataframe_to_excel_bytes(summary_df)
-        except RuntimeError:
-            excel_export_available = False
-        export_col1, export_col2 = st.columns(2)
-        export_col1.download_button(
+        st.download_button(
             "Скачать CSV",
             data=summary_df.to_csv(index=False).encode("utf-8-sig"),
             file_name="data_risk_summary.csv",
             mime="text/csv",
             use_container_width=True,
         )
-        if excel_export_available and excel_bytes is not None:
-            export_col2.download_button(
-                "Скачать Excel",
-                data=excel_bytes,
-                file_name="data_risk_summary.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-        else:
-            export_col2.empty()
 
         visible_ids = [candidate.candidate_id for candidate in visible_candidates]
         current_selected_id = st.session_state.get("selected_candidate_id")

@@ -6,3 +6,6 @@
 .venv/
 __pycache__/
 *.pyc
+tmp/
+outputs/
+data/feedback_cases.jsonl
