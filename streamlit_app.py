@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import importlib.util
 import io
+import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ import streamlit as st
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SRC_ROOT = PROJECT_ROOT / "src"
+FEEDBACK_CASES_PATH = PROJECT_ROOT / "data" / "feedback_cases.jsonl"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
@@ -232,8 +234,36 @@ def inject_brand_css() -> None:
 def initialize_ui_state() -> None:
     st.session_state.setdefault("candidate_state", {})
     st.session_state.setdefault("decision_events", [])
+    st.session_state.setdefault("feedback_cases", [])
+    st.session_state.setdefault("feedback_cases_loaded", False)
     st.session_state.setdefault("flash_message", None)
     st.session_state.setdefault("pending_confirmation", None)
+
+
+def load_feedback_cases_from_storage() -> list[dict]:
+    if not FEEDBACK_CASES_PATH.exists():
+        return []
+    items: list[dict] = []
+    with FEEDBACK_CASES_PATH.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            items.append(json.loads(line))
+    return items
+
+
+def append_feedback_case_to_storage(item: dict) -> None:
+    FEEDBACK_CASES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with FEEDBACK_CASES_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
+def ensure_feedback_cases_loaded() -> None:
+    if st.session_state.get("feedback_cases_loaded"):
+        return
+    st.session_state["feedback_cases"] = load_feedback_cases_from_storage()
+    st.session_state["feedback_cases_loaded"] = True
 
 
 def ensure_candidate_state(candidates) -> None:
@@ -330,6 +360,29 @@ def open_confirmation(candidate_id: str, action: str) -> None:
     }
 
 
+def render_confirmation_version_preview(candidate, action: str) -> None:
+    saved_state = st.session_state["candidate_state"][candidate.candidate_id]
+    edited_service_name, edited_service_id, edited_description = read_editor_values(candidate)
+
+    if action in {"apply_generated", "register_generated"}:
+        preview_title = "Будет использована исходная версия агента"
+        preview_service_name = saved_state["generated_service_name"]
+        preview_service_id = saved_state["generated_service_id"]
+        preview_description = saved_state["generated_description"]
+    elif action in {"register_corrected", "link_existing", "merge_existing", "keep_separate", "reject_candidate"}:
+        preview_title = "Будет использована текущая скорректированная пользователем версия"
+        preview_service_name = edited_service_name
+        preview_service_id = edited_service_id
+        preview_description = edited_description
+    else:
+        return
+
+    st.markdown(f"**{preview_title}**")
+    st.write(f"**Фронтальная ИТ-услуга:** {preview_service_name} ({preview_service_id})")
+    st.write("**Описание риска:**")
+    st.code(preview_description or "Описание риска не заполнено", language=None)
+
+
 @st.dialog("Подтверждение действия")
 def render_confirmation_dialog(agent: DataRiskAgent, candidate) -> None:
     pending = st.session_state.get("pending_confirmation")
@@ -339,16 +392,22 @@ def render_confirmation_dialog(agent: DataRiskAgent, candidate) -> None:
     action = pending["action"]
     dialog_text = {
         "apply_generated": "Подтверждаете, что хотите разместить в поле сформированную агентом версию риска?",
+        "register_generated": "Подтверждаете регистрацию версии риска в формулировке агента?",
         "register_corrected": "Подтверждаете регистрацию скорректированной версии риска?",
+        "link_existing": "Подтверждаете привязку инцидентов-оснований к уже существующему риску без изменения его описания?",
+        "merge_existing": "Подтверждаете обобщение существующего риска с учетом нового сценария?",
+        "keep_separate": "Подтверждаете добавление нового сценария в уже существующий риск?",
         "reject_candidate": "Укажите обоснование и подтвердите отклонение риска.",
     }.get(action, "Подтверждаете действие?")
     success_text = {
         "apply_generated": "Сформированная агентом версия размещена в редактируемом поле.",
+        "register_generated": None,
         "register_corrected": None,
         "reject_candidate": None,
     }
 
     st.write(dialog_text)
+    render_confirmation_version_preview(candidate, action)
     rejection_reason = ""
     if action == "reject_candidate":
         rejection_reason = st.text_area(
@@ -366,6 +425,20 @@ def render_confirmation_dialog(agent: DataRiskAgent, candidate) -> None:
             st.session_state[editor_key(candidate.candidate_id, "service_id")] = saved_state["generated_service_id"]
             st.session_state[editor_key(candidate.candidate_id, "description")] = saved_state["generated_description"]
             set_flash_message("info", success_text[action])
+        elif action == "register_generated":
+            candidate.service_name = saved_state["generated_service_name"]
+            candidate.service_id = saved_state["generated_service_id"]
+            candidate.description = saved_state["generated_description"]
+            candidate.audit_log.append("Пользователь зарегистрировал риск в формулировке агента.")
+            task = agent.register_risk(candidate.candidate_id, RegistrationMode.REGISTER_AS_PROPOSED)
+            record_feedback_case(
+                "register_generated",
+                "Зарегистрирована версия агента",
+                candidate,
+                "Пользователь принял исходную формулировку агента без изменений.",
+            )
+            persist_candidate_state(candidate)
+            set_flash_message("success", task.message)
         elif action == "register_corrected":
             service_name, service_id, description = read_editor_values(candidate)
             candidate.service_name = service_name
@@ -373,8 +446,62 @@ def render_confirmation_dialog(agent: DataRiskAgent, candidate) -> None:
             updated = agent.apply_user_override(candidate.candidate_id, description)
             task = agent.register_risk(updated.candidate_id, RegistrationMode.EDIT_AND_REGISTER)
             record_decision_event("corrected", updated)
+            record_feedback_case(
+                "register_corrected",
+                "Зарегистрирована скорректированная версия",
+                updated,
+                "Пользователь вручную скорректировал формулировку или сущности перед регистрацией.",
+            )
             persist_candidate_state(updated)
             set_flash_message("success", task.message)
+        elif action == "link_existing":
+            service_name, service_id, description = read_editor_values(candidate)
+            candidate.service_name = service_name
+            candidate.service_id = service_id
+            candidate.description = description
+            candidate.audit_log.append(
+                "Пользователь решил привязать инциденты-основания к уже существующему риску без изменения его описания."
+            )
+            record_feedback_case(
+                "link_existing",
+                "Инциденты привязаны к существующему риску",
+                candidate,
+                "Пользователь не увидел необходимости менять описание существующего риска.",
+            )
+            persist_candidate_state(candidate)
+            set_flash_message("info", "Решение привязать инциденты к существующему риску сохранено в журнале действий.")
+        elif action == "merge_existing":
+            service_name, service_id, description = read_editor_values(candidate)
+            candidate.service_name = service_name
+            candidate.service_id = service_id
+            candidate.description = description
+            candidate.audit_log.append(
+                "Пользователь решил обобщить существующий риск и обновить его описание с учетом нового сценария."
+            )
+            record_feedback_case(
+                "merge_existing",
+                "Существующий риск обобщен",
+                candidate,
+                "Пользователь решил, что существующий риск нужно расширить с учетом нового сценария.",
+            )
+            persist_candidate_state(candidate)
+            set_flash_message("info", "Решение по обобщению существующего риска сохранено в журнале действий.")
+        elif action == "keep_separate":
+            service_name, service_id, description = read_editor_values(candidate)
+            candidate.service_name = service_name
+            candidate.service_id = service_id
+            candidate.description = description
+            candidate.audit_log.append(
+                "Пользователь решил дополнить существующий риск новым сценарием с соответствующей пометкой."
+            )
+            record_feedback_case(
+                "keep_separate",
+                "Добавлен новый сценарий в существующий риск",
+                candidate,
+                "Пользователь решил сохранить новый кейс как отдельный сценарий внутри уже существующего риска.",
+            )
+            persist_candidate_state(candidate)
+            set_flash_message("info", "Решение дополнить существующий риск новым сценарием сохранено в журнале действий.")
         elif action == "reject_candidate":
             if not rejection_reason.strip():
                 st.warning("Нужно заполнить обоснование отклонения.")
@@ -389,6 +516,12 @@ def render_confirmation_dialog(agent: DataRiskAgent, candidate) -> None:
             )
             persist_candidate_state(candidate)
             record_decision_event("rejected", candidate)
+            record_feedback_case(
+                "reject_candidate",
+                "Риск отклонен",
+                candidate,
+                rejection_reason.strip(),
+            )
             set_flash_message("warning", "Кандидат переведен в статус 'Отклонен'.")
         st.session_state["pending_confirmation"] = None
         st.rerun()
@@ -406,6 +539,106 @@ def record_decision_event(event_type: str, candidate) -> None:
             "candidate_id": candidate.candidate_id,
             "process_name": candidate.process_name,
             "service_name": candidate.service_name,
+        }
+    )
+
+
+def feedback_reward(action: str) -> float:
+    rewards = {
+        "register_generated": 1.0,
+        "register_corrected": 0.4,
+        "link_existing": 0.2,
+        "merge_existing": 0.1,
+        "keep_separate": 0.1,
+        "reject_candidate": -1.0,
+    }
+    return rewards.get(action, 0.0)
+
+
+def learning_mode_for_action(action: str) -> str:
+    modes = {
+        "register_generated": "positive_acceptance",
+        "register_corrected": "supervised_correction",
+        "link_existing": "routing_correction",
+        "merge_existing": "merge_decision",
+        "keep_separate": "scenario_boundary_decision",
+        "reject_candidate": "negative_rejection",
+    }
+    return modes.get(action, "manual_review")
+
+
+def learning_note_for_action(action: str) -> str:
+    notes = {
+        "register_generated": "Агентный вариант принят без изменений. Логика сработала корректно.",
+        "register_corrected": "Пользователь изменил формулировку или сущности. Нужно улучшать текст риска или определение фронтальной ИТ-услуги.",
+        "link_existing": "Агенту стоит точнее понимать, когда достаточно привязать инциденты к уже существующему риску без изменения описания.",
+        "merge_existing": "Агенту стоит лучше предлагать обобщение с уже имеющимся риском вместо отдельного проектного описания.",
+        "keep_separate": "Агенту стоит лучше различать, когда новый кейс должен стать отдельным сценарием внутри уже имеющегося риска.",
+        "reject_candidate": "Нужно пересматривать правила отбора или валидации, потому что пользователь не подтвердил предложенный риск.",
+    }
+    return notes.get(action, "Требуется дополнительный разбор кейса методологом.")
+
+
+def build_learning_prompt(candidate, saved_state: dict) -> str:
+    return (
+        f"Бизнес-процесс: {candidate.process_name}\n"
+        f"Фронтальная ИТ-услуга: {candidate.service_name} ({candidate.service_id})\n"
+        f"Инциденты-основания: {', '.join(candidate.incident_ids)}\n"
+        f"Исходная версия агента: {saved_state.get('generated_description', '')}"
+    )
+
+
+def record_feedback_case(action: str, action_label: str, candidate, rationale: str = "") -> None:
+    saved_state = st.session_state["candidate_state"][candidate.candidate_id]
+    item = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "candidate_id": candidate.candidate_id,
+        "process_name": candidate.process_name,
+        "service_name": candidate.service_name,
+        "service_id": candidate.service_id,
+        "incident_ids": ", ".join(candidate.incident_ids),
+        "agent_version": saved_state.get("generated_description", ""),
+        "user_version": candidate.description,
+        "action_code": action,
+        "action_label": action_label,
+        "rationale": rationale or "Без дополнительного комментария",
+        "learning_note": learning_note_for_action(action),
+        "reward_signal": feedback_reward(action),
+        "learning_mode": learning_mode_for_action(action),
+        "learning_prompt": build_learning_prompt(candidate, saved_state),
+        "preferred_response": candidate.description if action != "register_generated" else saved_state.get("generated_description", ""),
+        "rejected_response": saved_state.get("generated_description", "") if action in {"register_corrected", "reject_candidate"} else "",
+    }
+    st.session_state["feedback_cases"].append(item)
+    append_feedback_case_to_storage(item)
+
+
+def build_learning_dataset_df() -> pd.DataFrame:
+    feedback_cases = st.session_state.get("feedback_cases", [])
+    if not feedback_cases:
+        return pd.DataFrame()
+    frame = pd.DataFrame(feedback_cases)
+    frame["Время"] = pd.to_datetime(frame["timestamp"]).dt.strftime("%Y-%m-%d %H:%M:%S")
+    return frame[
+        [
+            "Время",
+            "candidate_id",
+            "action_label",
+            "reward_signal",
+            "learning_mode",
+            "learning_prompt",
+            "preferred_response",
+            "rejected_response",
+        ]
+    ].rename(
+        columns={
+            "candidate_id": "Кейс",
+            "action_label": "Сигнал пользователя",
+            "reward_signal": "Reward",
+            "learning_mode": "Режим обучения",
+            "learning_prompt": "Контекст кейса",
+            "preferred_response": "Предпочтительный ответ",
+            "rejected_response": "Отклоненный ответ",
         }
     )
 
@@ -432,6 +665,42 @@ def build_decision_trend_df() -> pd.DataFrame:
         if column not in grouped.columns:
             grouped[column] = 0
     return grouped[["Период", "Отклоненные риски", "Скорректированные риски"]]
+
+
+def build_feedback_cases_df() -> pd.DataFrame:
+    feedback_cases = st.session_state.get("feedback_cases", [])
+    if not feedback_cases:
+        return pd.DataFrame()
+    frame = pd.DataFrame(feedback_cases)
+    frame["Время"] = pd.to_datetime(frame["timestamp"]).dt.strftime("%Y-%m-%d %H:%M:%S")
+    return frame[
+        [
+            "Время",
+            "candidate_id",
+            "process_name",
+            "service_name",
+            "service_id",
+            "incident_ids",
+            "action_label",
+            "rationale",
+            "learning_note",
+            "agent_version",
+            "user_version",
+        ]
+    ].rename(
+        columns={
+            "candidate_id": "Кейс",
+            "process_name": "Бизнес-процесс",
+            "service_name": "Фронтальная ИТ-услуга",
+            "service_id": "Идентификатор ИТ-услуги",
+            "incident_ids": "Инциденты-основания",
+            "action_label": "Ответ пользователя",
+            "rationale": "Обоснование пользователя",
+            "learning_note": "Что корректировать в агенте",
+            "agent_version": "Предложение агента",
+            "user_version": "Итоговая версия по кейсу",
+        }
+    )
 
 
 def render_flash_message() -> None:
@@ -503,7 +772,33 @@ def is_registered_status(status: RiskStatus) -> bool:
     return status in {RiskStatus.REGISTERED, RiskStatus.AUTO_REGISTERED}
 
 
-def summarize_generalization(candidate) -> dict[str, str]:
+def find_combination_risks(process_risks, service_id: str, service_name: str):
+    normalized_service_id = service_id.strip()
+    normalized_service_name = service_name.strip().casefold()
+    matches = []
+    for risk in process_risks:
+        if normalized_service_id and risk.service_id == normalized_service_id:
+            matches.append(risk)
+            continue
+        if not normalized_service_id and normalized_service_name and risk.service_name.casefold() == normalized_service_name:
+            matches.append(risk)
+    return matches
+
+
+def summarize_generalization(candidate, exact_combination_risks) -> dict[str, str]:
+    if exact_combination_risks:
+        risk_ids = ", ".join(risk.risk_id for risk in exact_combination_risks)
+        return {
+            "kind": "exact_combination_exists",
+            "title": "На этом сочетании уже есть зарегистрированный риск",
+            "summary": (
+                f"Для сочетания {candidate.process_name} + {candidate.service_name} ({candidate.service_id}) "
+                f"уже найден риск {risk_ids}. Новый риск создавать не нужно: можно либо уточнить существующий, "
+                "либо дополнить его новым сценарием, либо просто привязать к нему инциденты-основания."
+            ),
+            "action_label": "Привязать инциденты к существующему риску",
+        }
+
     if not candidate.existing_risk_matches:
         return {
             "kind": "new_risk",
@@ -563,9 +858,24 @@ def build_candidates_export_df(agent: DataRiskAgent, candidates) -> pd.DataFrame
     rows = []
     for candidate in candidates:
         process_risks = agent.get_process_risks(candidate.process_id)
+        source_services = ", ".join(
+            dict.fromkeys(
+                f"{scenario.source_service_name} ({scenario.source_service_id})"
+                for scenario in candidate.scenarios
+            )
+        )
+        references = ", ".join(
+            dict.fromkeys(
+                scenario.matched_reference
+                for scenario in candidate.scenarios
+                if scenario.matched_reference
+            )
+        )
         rows.append(
             {
                 "Бизнес-процесс": candidate.process_name,
+                "Источник проблемных данных": source_services,
+                "Контракт/оферта": references,
                 "Фронтальная ИТ-услуга": candidate.service_name,
                 "Идентификатор ИТ-услуги": candidate.service_id,
                 "Имеющиеся риски": ", ".join(risk.risk_id for risk in process_risks) if process_risks else "",
@@ -620,8 +930,49 @@ def filter_candidates(agent: DataRiskAgent, candidates, process_filter: str, ser
     return filtered
 
 
+def build_chain_lines(candidate) -> list[str]:
+    grouped: dict[tuple[str, str, str | None, str, str, str], list[str]] = {}
+    for scenario in candidate.scenarios:
+        key = (
+            f"{scenario.source_service_name} ({scenario.source_service_id})",
+            f"{scenario.service_name} ({scenario.service_id})",
+            scenario.matched_reference,
+            scenario.loss_process_name,
+            scenario.role_description,
+            scenario.process_outcome,
+        )
+        grouped.setdefault(key, []).append(scenario.incident_id)
+
+    lines: list[str] = []
+    for (
+        source_service,
+        receiver_service,
+        matched_reference,
+        loss_process_name,
+        role_description,
+        process_outcome,
+    ), incident_ids in grouped.items():
+        incident_part = f"По {len(incident_ids)} инцидентам"
+        if source_service == receiver_service:
+            source_part = f"проблема с данными была зафиксирована непосредственно в {receiver_service}"
+        else:
+            reference_part = f" по {matched_reference}" if matched_reference else ""
+            source_part = (
+                f"данные от {source_service}{reference_part} поступали в {receiver_service}"
+            )
+        line = (
+            f"{incident_part} {source_part}; "
+            f"в процессе эта ИТ-услуга {role_description}; "
+            f"итог процесса: {process_outcome}; "
+            f"потери реализуются в процессе {loss_process_name}."
+        )
+        lines.append(line)
+    return lines
+
+
 inject_brand_css()
 initialize_ui_state()
+ensure_feedback_cases_loaded()
 agent = load_agent()
 pipeline = agent.run()
 ensure_candidate_state(pipeline.candidates)
@@ -723,8 +1074,9 @@ with risk_tab:
             st.session_state["selected_candidate_id"] = current_selected_id
 
         candidate = next(item for item in visible_candidates if item.candidate_id == current_selected_id)
-        generalization = summarize_generalization(candidate)
         process_risks = agent.get_process_risks(candidate.process_id)
+        exact_combination_risks = find_combination_risks(process_risks, candidate.service_id, candidate.service_name)
+        generalization = summarize_generalization(candidate, exact_combination_risks)
         sync_editor_state(candidate)
         if (st.session_state.get("pending_confirmation") or {}).get("candidate_id") == candidate.candidate_id:
             render_confirmation_dialog(agent, candidate)
@@ -784,9 +1136,18 @@ with risk_tab:
                 render_stat_card("Имеющиеся риски на процессе", str(len(process_risks)), process_risk_ids(agent, candidate))
             with passport_cols[3]:
                 render_stat_card("Инциденты-основания", str(len(candidate.incident_ids)), ", ".join(candidate.incident_ids[:3]) + ("..." if len(candidate.incident_ids) > 3 else ""))
+
+            chain_box = st.container(border=True)
+            with chain_box:
+                st.markdown("### Цепочка данных и потерь")
+                st.caption("Кратко поясняет, откуда пришли проблемные данные, как они участвуют в процессе и где могут реализоваться потери.")
+                for line in build_chain_lines(candidate):
+                    st.write(f"- {line}")
+
             new_risk_box = st.container(border=True)
             with new_risk_box:
-                st.markdown("### Проект нового риска")
+                box_title = "### Проект уточнения существующего риска" if exact_combination_risks else "### Проект нового риска"
+                st.markdown(box_title)
                 if is_registered_status(candidate.status):
                     st.markdown('<span class="status-chip">Этот риск уже зарегистрирован</span>', unsafe_allow_html=True)
                 else:
@@ -807,6 +1168,8 @@ with risk_tab:
                     key=editor_key(candidate.candidate_id, "service_id"),
                 )
                 st.caption("Если агент определил не ту сущность, здесь можно вручную исправить фронтальную ИТ-услугу.")
+                current_exact_combination_risks = find_combination_risks(process_risks, edited_service_id, edited_service_name)
+                has_exact_combination_risk = bool(current_exact_combination_risks)
 
                 fact_cols = st.columns(2)
                 fact_cols[0].markdown(
@@ -824,84 +1187,67 @@ with risk_tab:
                     height=220,
                 )
 
-                editor_action_columns = st.columns(3)
-                if editor_action_columns[0].button(
+                utility_columns = st.columns(2)
+                if utility_columns[0].button(
                     "Разместить сформированную агентом версию",
                     key=f"apply_generated::{candidate.candidate_id}",
                 ):
                     open_confirmation(candidate.candidate_id, "apply_generated")
                     st.rerun()
-                if (
-                    not is_registered_status(candidate.status)
-                    and editor_action_columns[1].button(
-                        "Зарегистрировать скорректированную версию",
-                        key=f"register_corrected_editor::{candidate.candidate_id}",
-                    )
-                ):
-                    open_confirmation(candidate.candidate_id, "register_corrected")
-                    st.rerun()
-                if (
-                    not is_registered_status(candidate.status)
-                    and editor_action_columns[2].button(
-                        "Отклонить",
-                        key=f"reject_editor::{candidate.candidate_id}",
-                    )
-                ):
-                    open_confirmation(candidate.candidate_id, "reject_candidate")
-                    st.rerun()
-
-                can_merge_with_existing = bool(candidate.existing_risk_matches) and not is_registered_status(candidate.status)
-                can_keep_separate = bool(candidate.existing_risk_matches) and not is_registered_status(candidate.status)
-                can_link_to_existing = (
-                    generalization["kind"] == "covered_by_existing"
-                    and bool(candidate.existing_risk_matches)
-                    and not is_registered_status(candidate.status)
-                )
-
-                available_editor_merge_actions: list[tuple[str, str]] = []
-                if can_link_to_existing:
-                    available_editor_merge_actions.append((generalization["action_label"], "link_existing"))
-                elif can_merge_with_existing:
-                    available_editor_merge_actions.append(("Объединить сценарии", "merge_existing"))
-                if can_keep_separate:
-                    available_editor_merge_actions.append(("Оставить отдельным сценарием", "keep_separate"))
-
-                if available_editor_merge_actions:
-                    st.markdown("**Решение по отношению к уже имеющемуся риску**")
-                    merge_action_columns = st.columns(len(available_editor_merge_actions))
-                    for column, (label, action_key) in zip(merge_action_columns, available_editor_merge_actions, strict=False):
-                        if action_key == "link_existing" and column.button(label, key=f"link_existing_editor::{candidate.candidate_id}"):
-                            candidate.service_name = edited_service_name.strip()
-                            candidate.service_id = edited_service_id.strip()
-                            candidate.description = edited_description.strip()
-                            candidate.audit_log.append(
-                                "Пользователь решил использовать существующий риск и привязать к нему инциденты-основания."
-                            )
-                            persist_candidate_state(candidate)
-                            set_flash_message("info", "Решение использовать существующий риск сохранено в журнале действий.")
+                if not is_registered_status(candidate.status):
+                    if has_exact_combination_risk:
+                        st.markdown("**Доступные решения по существующему риску на этом сочетании**")
+                        decision_columns = st.columns(5)
+                        if decision_columns[0].button(
+                            "Зарегистрировать скорректированную версию",
+                            key=f"register_corrected_editor::{candidate.candidate_id}",
+                        ):
+                            open_confirmation(candidate.candidate_id, "register_corrected")
                             st.rerun()
-                        if action_key == "merge_existing" and column.button(label, key=f"merge_existing_editor::{candidate.candidate_id}"):
-                            candidate.service_name = edited_service_name.strip()
-                            candidate.service_id = edited_service_id.strip()
-                            candidate.description = edited_description.strip()
-                            candidate.audit_log.append(
-                                "Пользователь подтвердил объединение нового сценария с уже имеющимся риском."
-                            )
-                            persist_candidate_state(candidate)
-                            set_flash_message("info", "Решение об объединении сценариев сохранено в журнале действий.")
+                        if decision_columns[1].button(
+                            "Привязать инциденты к существующему риску",
+                            key=f"link_existing_editor::{candidate.candidate_id}",
+                        ):
+                            open_confirmation(candidate.candidate_id, "link_existing")
                             st.rerun()
-                        if action_key == "keep_separate" and column.button(label, key=f"keep_separate_editor::{candidate.candidate_id}"):
-                            candidate.service_name = edited_service_name.strip()
-                            candidate.service_id = edited_service_id.strip()
-                            candidate.description = edited_description.strip()
-                            candidate.audit_log.append(
-                                "Пользователь решил дополнить описание уже имеющегося риска новым сценарием с соответствующей пометкой."
-                            )
-                            persist_candidate_state(candidate)
-                            set_flash_message(
-                                "info",
-                                "Решение сохранить новый сценарий внутри уже имеющегося риска сохранено в журнале действий.",
-                            )
+                        if decision_columns[2].button(
+                            "Обобщить существующий риск",
+                            key=f"merge_existing_editor::{candidate.candidate_id}",
+                        ):
+                            open_confirmation(candidate.candidate_id, "merge_existing")
+                            st.rerun()
+                        if decision_columns[3].button(
+                            "Дополнить новым сценарием",
+                            key=f"keep_separate_editor::{candidate.candidate_id}",
+                        ):
+                            open_confirmation(candidate.candidate_id, "keep_separate")
+                            st.rerun()
+                        if decision_columns[4].button(
+                            "Отклонить",
+                            key=f"reject_editor::{candidate.candidate_id}",
+                        ):
+                            open_confirmation(candidate.candidate_id, "reject_candidate")
+                            st.rerun()
+                    else:
+                        st.markdown("**Доступные решения по новому риску**")
+                        decision_columns = st.columns(3)
+                        if decision_columns[0].button(
+                            "Зарегистрировать версию агента",
+                            key=f"register_generated_editor::{candidate.candidate_id}",
+                        ):
+                            open_confirmation(candidate.candidate_id, "register_generated")
+                            st.rerun()
+                        if decision_columns[1].button(
+                            "Зарегистрировать скорректированную версию",
+                            key=f"register_corrected_editor::{candidate.candidate_id}",
+                        ):
+                            open_confirmation(candidate.candidate_id, "register_corrected")
+                            st.rerun()
+                        if decision_columns[2].button(
+                            "Отклонить",
+                            key=f"reject_editor::{candidate.candidate_id}",
+                        ):
+                            open_confirmation(candidate.candidate_id, "reject_candidate")
                             st.rerun()
 
                 st.markdown(
@@ -1006,7 +1352,7 @@ with metrics_tab:
         "Эта вкладка нужна методологам и не предназначена для обычных пользователей процесса.",
     )
     st.markdown(
-        '<div class="method-note">Здесь собраны метрики по качеству работы агента: доля инцидентов с признаками риска данных, доля отклонений, доля корректировок и их динамика во времени.</div>',
+        '<div class="method-note">Здесь собраны метрики по качеству работы агента: доля инцидентов с признаками риска данных, доля отклонений, доля корректировок и их динамика во времени. Ниже также ведется база разбора кейсов и контур обучающей обратной связи, который можно использовать для последующего обучения по предпочтениям и корректировкам.</div>',
         unsafe_allow_html=True,
     )
 
@@ -1064,3 +1410,48 @@ with metrics_tab:
         st.dataframe(decision_trend_df, use_container_width=True, hide_index=True)
     else:
         st.info("Пока нет пользовательских действий по отклонению или корректировке рисков, поэтому график пуст.")
+
+    st.markdown("### База запросов и ответов по кейсам")
+    st.caption(
+        "Этот реестр нужен методологам: по нему видно, как агент сформулировал кейс, как ответил пользователь и что именно стоит корректировать в логике агента."
+    )
+    feedback_cases_df = build_feedback_cases_df()
+    if not feedback_cases_df.empty:
+        st.dataframe(feedback_cases_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("Пока база разбора кейсов пуста. Она начнет наполняться после пользовательских решений по карточкам рисков.")
+
+    st.markdown("### Контур обучающей обратной связи")
+    st.caption(
+        "Каждое пользовательское решение сохраняется как обучающий пример: с reward-сигналом, типом корректировки и готовыми полями для последующей донастройки агента."
+    )
+    learning_dataset_df = build_learning_dataset_df()
+    if not learning_dataset_df.empty:
+        learning_cards = st.columns(3)
+        with learning_cards[0]:
+            render_stat_card("Обучающих примеров", str(len(learning_dataset_df)))
+        with learning_cards[1]:
+            corrected_examples = int((learning_dataset_df["Режим обучения"] == "supervised_correction").sum())
+            render_stat_card("Примеров с корректировкой", str(corrected_examples))
+        with learning_cards[2]:
+            negative_examples = int((learning_dataset_df["Reward"] < 0).sum())
+            render_stat_card("Негативных сигналов", str(negative_examples))
+
+        export_cols = st.columns(2)
+        export_cols[0].download_button(
+            "Скачать обучающую выборку CSV",
+            data=learning_dataset_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name="data_risk_learning_dataset.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+        export_cols[1].download_button(
+            "Скачать JSONL для дообучения",
+            data="\n".join(json.dumps(item, ensure_ascii=False) for item in st.session_state["feedback_cases"]).encode("utf-8"),
+            file_name="data_risk_learning_dataset.jsonl",
+            mime="application/jsonl",
+            use_container_width=True,
+        )
+        st.dataframe(learning_dataset_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("Пока нет обучающих примеров. Они появятся после пользовательских решений по карточкам рисков.")

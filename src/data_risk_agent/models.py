@@ -101,6 +101,8 @@ class RemediationWork:
 class ResolvedFlow:
     source_incident_id: str
     matched_reference: str | None
+    source_service_id: str
+    source_service_name: str
     receiver_service_id: str
     receiver_service_name: str
     process_id: str
@@ -116,6 +118,9 @@ class ResolvedFlow:
 class RiskScenario:
     scenario_id: str
     incident_id: str
+    source_service_id: str
+    source_service_name: str
+    matched_reference: str | None
     service_id: str
     service_name: str
     process_id: str

@@ -24,7 +24,9 @@ def test_standard_incident_extracts_reference_and_resolves_receiver() -> None:
     agent = build_agent()
     scenarios = agent.analyze_incident("INC-1001")
     assert scenarios
+    assert scenarios[0].source_service_id == "CI94565765"
     assert scenarios[0].service_id == "CI12345667"
+    assert scenarios[0].matched_reference == "OF-3001"
     assert any("OF-3001" in evidence for evidence in scenarios[0].evidence)
 
 
@@ -89,6 +91,15 @@ def test_candidate_shows_process_risks_without_service_filter() -> None:
     assert candidate.existing_risk_matches[0].risk_id == "R-1002"
 
 
+def test_combination_risk_lookup_uses_process_and_service() -> None:
+    agent = build_agent()
+    exact_matches = agent.get_combination_risks("P1340", "CI12345667")
+    no_matches = agent.get_combination_risks("P1340", "CI00000000")
+    assert len(exact_matches) == 1
+    assert exact_matches[0].risk_id == "R-1001"
+    assert no_matches == []
+
+
 def test_only_similar_existing_risks_are_returned() -> None:
     agent = build_agent()
     matches = agent.find_existing_risks("P1180")
@@ -130,6 +141,15 @@ def test_external_api_failure_moves_registration_to_manual_review() -> None:
     candidate = next(item for item in result.candidates if item.candidate_id == "P1340::CI12345667")
     task = agent.register_risk(candidate.candidate_id, RegistrationMode.EDIT_AND_REGISTER)
     assert task.audit_status.value == "MANUAL_REVIEW"
+
+
+def test_register_as_proposed_marks_candidate_registered() -> None:
+    agent = build_agent()
+    result = agent.run()
+    candidate = next(item for item in result.candidates if item.candidate_id == "P2210::CI22334455")
+    task = agent.register_risk(candidate.candidate_id, RegistrationMode.REGISTER_AS_PROPOSED)
+    assert task.audit_status.value == "SUCCESS"
+    assert candidate.status == RiskStatus.REGISTERED
 
 
 def test_quality_metrics_are_calculated() -> None:

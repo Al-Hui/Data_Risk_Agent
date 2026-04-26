@@ -209,6 +209,9 @@ class DataRiskAgent:
             scenario = RiskScenario(
                 scenario_id=f"SCN-{incident.incident_id}-{flow.process_id}",
                 incident_id=incident.incident_id,
+                source_service_id=flow.source_service_id,
+                source_service_name=flow.source_service_name,
+                matched_reference=flow.matched_reference,
                 service_id=flow.receiver_service_id,
                 service_name=flow.receiver_service_name,
                 process_id=flow.process_id,
@@ -317,6 +320,15 @@ class DataRiskAgent:
     def has_process_risks(self, process_id: str) -> bool:
         return bool(self._list_process_risks(process_id))
 
+    def get_combination_risks(self, process_id: str, service_id: str) -> list[ExistingRisk]:
+        return [
+            risk for risk in self._list_process_risks(process_id)
+            if risk.service_id == service_id
+        ]
+
+    def has_combination_risk(self, process_id: str, service_id: str) -> bool:
+        return bool(self.get_combination_risks(process_id, service_id))
+
     def find_existing_risks(self, process_id: str) -> list[ExistingRiskMatch]:
         matches: list[ExistingRiskMatch] = []
         existing_risks = self._list_process_risks(process_id)
@@ -402,7 +414,7 @@ class DataRiskAgent:
         )
         candidate.audit_log.append(message)
         if ok:
-            candidate.status = RiskStatus.REGISTERED if mode is not RegistrationMode.REGISTER_AS_PROPOSED else candidate.status
+            candidate.status = RiskStatus.REGISTERED
         return task
 
     def register_mitigation(self, candidate_id: str, mitigation_ids: list[str]) -> RegistrationTask:
@@ -495,6 +507,8 @@ class DataRiskAgent:
                         ResolvedFlow(
                             source_incident_id=incident.incident_id,
                             matched_reference=reference,
+                            source_service_id=incident.service_id,
+                            source_service_name=incident.service_name,
                             receiver_service_id=contract.receiver_service_id,
                             receiver_service_name=contract.receiver_service_name,
                             process_id=role.process_id,
@@ -524,6 +538,8 @@ class DataRiskAgent:
                     ResolvedFlow(
                         source_incident_id=incident.incident_id,
                         matched_reference=None,
+                        source_service_id=incident.service_id,
+                        source_service_name=incident.service_name,
                         receiver_service_id=role.service_id,
                         receiver_service_name=role.service_name,
                         process_id=role.process_id,
@@ -555,6 +571,8 @@ class DataRiskAgent:
                 ResolvedFlow(
                     source_incident_id=incident.incident_id,
                     matched_reference=references[0] if references else None,
+                    source_service_id=incident.service_id,
+                    source_service_name=incident.service_name,
                     receiver_service_id=role.service_id,
                     receiver_service_name=role.service_name,
                     process_id=role.process_id,
