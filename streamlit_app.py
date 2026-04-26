@@ -59,6 +59,78 @@ def inject_brand_css() -> None:
             padding-top: 1.4rem;
             padding-bottom: 3rem;
         }
+        .stApp,
+        .stApp p,
+        .stApp li,
+        .stApp ul,
+        .stApp ol,
+        .stApp span,
+        .stApp label,
+        .stApp legend,
+        .stApp h1,
+        .stApp h2,
+        .stApp h3,
+        .stApp h4,
+        .stApp h5,
+        .stApp h6 {
+            color: #20352a;
+        }
+        div[data-testid="stMarkdownContainer"],
+        div[data-testid="stMarkdownContainer"] p,
+        div[data-testid="stMarkdownContainer"] li,
+        div[data-testid="stMarkdownContainer"] span,
+        div[data-testid="stCaptionContainer"],
+        div[data-testid="stCaptionContainer"] p,
+        label[data-testid="stWidgetLabel"],
+        div[data-testid="stText"],
+        div[data-testid="stExpander"] summary,
+        div[data-testid="stAlert"] {
+            color: #20352a !important;
+        }
+        div[data-testid="stMarkdownContainer"] h1,
+        div[data-testid="stMarkdownContainer"] h2,
+        div[data-testid="stMarkdownContainer"] h3,
+        div[data-testid="stMarkdownContainer"] h4 {
+            color: #173b23 !important;
+        }
+        div[data-testid="stCaptionContainer"] {
+            color: #5a7261 !important;
+        }
+        div[data-testid="stCheckbox"] label,
+        div[data-testid="stCheckbox"] p,
+        div[data-testid="stCheckbox"] span,
+        div[role="tabpanel"] p,
+        div[role="tabpanel"] li,
+        div[role="tabpanel"] span,
+        div[role="tabpanel"] label {
+            color: #20352a !important;
+        }
+        div[data-testid="stTextInput"] input,
+        div[data-testid="stTextArea"] textarea,
+        div[data-baseweb="input"] input,
+        div[data-baseweb="textarea"] textarea {
+            background: #ffffff !important;
+            color: #183626 !important;
+            border: 1px solid rgba(33, 160, 56, 0.18) !important;
+            border-radius: 14px !important;
+        }
+        div[data-testid="stTextInput"] input::placeholder,
+        div[data-testid="stTextArea"] textarea::placeholder,
+        div[data-baseweb="input"] input::placeholder,
+        div[data-baseweb="textarea"] textarea::placeholder {
+            color: #7a8e80 !important;
+        }
+        div[data-baseweb="select"] > div,
+        div[data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+            background: #ffffff !important;
+            color: #183626 !important;
+            border-color: rgba(33, 160, 56, 0.18) !important;
+        }
+        div[data-testid="stCodeBlock"] pre,
+        div[data-testid="stCode"] pre {
+            background: #f4f7f5 !important;
+            color: #183626 !important;
+        }
         div[data-testid="stTabs"] button {
             font-weight: 600;
         }
